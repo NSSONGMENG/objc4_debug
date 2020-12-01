@@ -95,6 +95,7 @@ public:
     Class getIsa();
     
     uintptr_t isaBits() const;
+    char *getName();
 
     // initIsa() should be used to init the isa of new objects only.
     // If this object already has an isa, use changeIsa() for correctness.
@@ -305,6 +306,9 @@ extern struct SafeRanges dataSegmentsRanges;
 
 struct header_info;
 
+// 从头部信息中分离可读写的数据，目前把他们放在一个超其需要的大数组中。
+// 未来在共享缓存构造器中将仅构建此结构
+// 
 // Split out the rw data from header info.  For now put it in a huge array
 // that more than exceeds the space needed.  In future we'll just allocate
 // this in the shared cache builder.
@@ -890,7 +894,12 @@ class StripedMap {
 #endif
 };
 
-
+/**
+ DisguisedPtr <T>的行为类似于指针类型T *，只是存储的值被伪装成对诸如“泄漏”之类的工具隐藏。
+ nil本身是伪装的，因此零填充内存可以按预期工作，
+ 这意味着0x80..00本身也被伪装了，但我们不在乎。
+ 请注意，weak_entry_t知道此编码。
+ */
 // DisguisedPtr<T> acts like pointer type T*, except the 
 // stored value is disguised to hide it from tools like `leaks`.
 // nil is disguised as itself so zero-filled memory works as expected, 

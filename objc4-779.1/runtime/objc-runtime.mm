@@ -265,12 +265,12 @@ objc::SafeRanges::remove(uintptr_t start, uintptr_t end)
 }
 
 /***********************************************************************
-* appendHeader.  Add a newly-constructed header_info to the list. 
+ * appendHeader.  Add a newly-constructed header_info to the list.
+ * 将header_info追加至链表尾部
 **********************************************************************/
 void appendHeader(header_info *hi)
 {
-    // Add the header to the header list. 
-    // The header is appended to the list, to preserve the bottom-up order.
+    // 将header信息追加至链表尾部，保持自底向上的顺序
     hi->setNext(NULL);
     if (!FirstHeader) {
         // list is empty
@@ -359,6 +359,7 @@ void environ_init(void)
     // Scan environ[] directly instead of calling getenv() a lot.
     // This optimizes the case where none are set.
     for (char **p = *_NSGetEnviron(); *p != nil; p++) {
+        printf("%s \n", *p);
         if (0 == strncmp(*p, "Malloc", 6)  ||  0 == strncmp(*p, "DYLD", 4)  ||  
             0 == strncmp(*p, "NSZombiesEnabled", 16))
         {

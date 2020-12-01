@@ -23,7 +23,9 @@
 
 /*
   objc-opt.mm
-  Management of optimizations in the dyld shared cache 
+  Management of optimizations in the dyld shared cache
+ 
+  管理优化dyld共享缓存
 */
 
 #include "objc-private.h"
@@ -136,13 +138,16 @@ __BEGIN_DECLS
 // _objc_opt_data: opt data possibly written by dyld
 // opt is initialized to ~0 to detect incorrect use before preopt_init()
 
+// 运行时使用的opt， opt数据可能由dyld写入
+// 在preopt_init()之前，opt被初始化为~0（0xffffffff）来检测不正确的使用
 static const objc_opt_t *opt = (objc_opt_t *)~0;
 static bool preoptimized;
 
 extern const objc_opt_t _objc_opt_data;  // in __TEXT, __objc_opt_ro
 
 /***********************************************************************
-* Return YES if we have a valid optimized shared cache.
+ * Return YES if we have a valid optimized shared cache.
+ * 设置了共享缓存则return YES
 **********************************************************************/
 bool isPreoptimized(void) 
 {
@@ -151,8 +156,9 @@ bool isPreoptimized(void)
 
 
 /***********************************************************************
-* Return YES if the shared cache does not have any classes with 
-* missing weak superclasses.
+ * Return YES if the shared cache does not have any classes with
+ * missing weak superclasses.
+ * 如果共享缓存没有丢失弱超累类的类，则返回YES【weak superclass ？】
 **********************************************************************/
 bool noMissingWeakSuperclasses(void) 
 {
@@ -162,7 +168,8 @@ bool noMissingWeakSuperclasses(void)
 
 
 /***********************************************************************
-* Return YES if this image's dyld shared cache optimizations are valid.
+ * Return YES if this image's dyld shared cache optimizations are valid.
+ * 如果此镜像的dyle共享缓存优化有效，则返回YES
 **********************************************************************/
 bool header_info::isPreoptimized() const
 {
@@ -175,6 +182,7 @@ bool header_info::isPreoptimized() const
     return YES;
 }
 
+/// 是否包含预优化的selector
 bool header_info::hasPreoptimizedSelectors() const
 {
     // preoptimization disabled for some reason
@@ -183,6 +191,7 @@ bool header_info::hasPreoptimizedSelectors() const
     return info()->optimizedByDyld() || info()->optimizedByDyldClosure();
 }
 
+/// 是否包含预优化的类
 bool header_info::hasPreoptimizedClasses() const
 {
     // preoptimization disabled for some reason
@@ -191,6 +200,7 @@ bool header_info::hasPreoptimizedClasses() const
     return info()->optimizedByDyld() || info()->optimizedByDyldClosure();
 }
 
+/// 是否包含预优化的协议
 bool header_info::hasPreoptimizedProtocols() const
 {
     // preoptimization disabled for some reason
@@ -199,18 +209,19 @@ bool header_info::hasPreoptimizedProtocols() const
     return info()->optimizedByDyld() || info()->optimizedByDyldClosure();
 }
 
-
+// 返回预优化的selector列表
 objc_selopt_t *preoptimizedSelectors(void) 
 {
     return opt ? opt->selopt() : nil;
 }
 
+// 共享缓存是否支持ProtocolRoots 【ProtocolRoots是个啥？】
 bool sharedCacheSupportsProtocolRoots(void)
 {
     return (opt != nil) && (opt->protocolopt2() != nil);
 }
 
-
+// 获取共享缓存预优化的协议
 Protocol *getSharedCachePreoptimizedProtocol(const char *name)
 {
     // Look in the new table if we have it
@@ -228,7 +239,7 @@ Protocol *getSharedCachePreoptimizedProtocol(const char *name)
     return (Protocol *)protocols->getProtocol(name);
 }
 
-
+/// 根据名称获取预优化的协议
 Protocol *getPreoptimizedProtocol(const char *name)
 {
     // Try table from dyld closure first.  It was built to ignore the dupes it
@@ -253,7 +264,7 @@ Protocol *getPreoptimizedProtocol(const char *name)
     return getSharedCachePreoptimizedProtocol(name);
 }
 
-
+/// 获不合理取预优化类的数量（不精确）
 unsigned int getPreoptimizedClassUnreasonableCount()
 {
     objc_clsopt_t *classes = opt ? opt->clsopt() : nil;
@@ -261,10 +272,11 @@ unsigned int getPreoptimizedClassUnreasonableCount()
     
     // This is an overestimate: each set of duplicates 
     // gets double-counted in `capacity` as well.
+    // 高估数量：每一组重复的数据在“容量”上也被重复计算
     return classes->capacity + classes->duplicateCount();
 }
 
-
+/// 根据name获取预优化的类
 Class getPreoptimizedClass(const char *name)
 {
     objc_clsopt_t *classes = opt ? opt->clsopt() : nil;
@@ -312,7 +324,7 @@ Class getPreoptimizedClass(const char *name)
     return nil;
 }
 
-
+/// 根据类名获取已预优化的类
 Class* copyPreoptimizedClasses(const char *name, int *outCount)
 {
     *outCount = 0;
@@ -395,7 +407,7 @@ struct objc_headeropt_rw_t {
 };
 };
 
-
+/// 根据header返回只读的预优化header_info
 header_info *preoptimizedHinfoForHeader(const headerType *mhdr)
 {
 #if !__OBJC2__
@@ -408,15 +420,17 @@ header_info *preoptimizedHinfoForHeader(const headerType *mhdr)
     else return nil;
 }
 
-
+/// 根据hader_info返回预优化的可读写的header_info_rw实例
 header_info_rw *getPreoptimizedHeaderRW(const struct header_info *const hdr)
 {
 #if !__OBJC2__
     // fixme old ABI shared cache doesn't prepare these properly
     return nil;
 #endif
-    
+    // read only
     objc_headeropt_ro_t *hinfoRO = opt ? opt->headeropt_ro() : nil;
+    
+    // read write
     objc_headeropt_rw_t *hinfoRW = opt ? opt->headeropt_rw() : nil;
     if (!hinfoRO || !hinfoRW) {
         _objc_fatal("preoptimized header_info missing for %s (%p %p %p)",
@@ -427,10 +441,10 @@ header_info_rw *getPreoptimizedHeaderRW(const struct header_info *const hdr)
     return &hinfoRW->headers[index];
 }
 
-
+// 在map_images时优先调用
 void preopt_init(void)
 {
-    // Get the memory region occupied by the shared cache.
+    // 获取共享缓存占用的内存区域
     size_t length;
     const uintptr_t start = (uintptr_t)_dyld_get_shared_cache_range(&length);
 

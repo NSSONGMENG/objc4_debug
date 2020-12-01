@@ -219,9 +219,9 @@ void SideTableLocksSucceedLocks(StripedMap<spinlock_t>& oldlocks) {
 }
 
 //
+// -fobjc-arc标志使编译器发出对objc_ {retain / release / autorelease / retain_block}的调用
 // The -fobjc-arc flag causes the compiler to issue calls to objc_{retain/release/autorelease/retain_block}
 //
-
 id objc_retainBlock(id x) {
     return (id)_Block_copy(x);
 }
@@ -241,6 +241,8 @@ objc_retain_autorelease(id obj)
 }
 
 
+// __strong操作
+// 对对象进行了retain操作，保证location变量存活期间对象不释放
 void
 objc_storeStrong(id *location, id obj)
 {
@@ -254,6 +256,13 @@ objc_storeStrong(id *location, id obj)
 }
 
 
+// 更新弱表
+// 若HaveOld为true，则变量有一个需要被清理的值
+// 若HaveNew为true，则有个新值需要分配给变量
+// 若CrashIfDeallocating为true，如果newObj正在释放或对应类不支持弱引用进程将会停止
+// @param location  弱指针
+// @param newObj    弱指针指向的对象
+//
 // Update a weak variable.
 // If HaveOld is true, the variable has an existing value 
 //   that needs to be cleaned up. This value might be nil.
@@ -278,6 +287,10 @@ storeWeak(id *location, objc_object *newObj)
     SideTable *oldTable;
     SideTable *newTable;
 
+    
+    // 获取旧值和新值的锁。
+    // 按锁地址排序，以防止出现锁排序问题。
+    // 若旧值在我们下面更改则重试。
     // Acquire locks for old and new values.
     // Order by lock address to prevent lock ordering problems. 
     // Retry if the old value changes underneath us.
@@ -301,6 +314,8 @@ storeWeak(id *location, objc_object *newObj)
         goto retry;
     }
 
+    
+    // 通过确保没有弱引用的对象具有未初始化的isa，可以防止弱引用机制和+初始化机制之间出现死锁。
     // Prevent a deadlock between the weak reference machinery
     // and the +initialize machinery by ensuring that no 
     // weakly-referenced object has an un-+initialized isa.
@@ -312,6 +327,10 @@ storeWeak(id *location, objc_object *newObj)
             SideTable::unlockTwo<haveOld, haveNew>(oldTable, newTable);
             class_initialize(cls, (id)newObj);
 
+            // 如果该类已完成+initialize调用，那么我们很好。
+            // 如果该类仍在该线程上执行+initialize
+            //（即，在其自身的实例+initialize时调用了storeWeak），然后我们可以继续进行操作，但它似乎已初始化且尚未初始化为上述检查。
+            // 而是将previousInitializedClass设置为在重试时识别它。
             // If this class is finished with +initialize then we're good.
             // If this class is still running +initialize on this thread 
             // (i.e. +initialize called storeWeak on an instance of itself)
@@ -324,11 +343,13 @@ storeWeak(id *location, objc_object *newObj)
         }
     }
 
+    // 清理旧值和location弱指针之间的引用关系
     // Clean up old value, if any.
     if (haveOld) {
         weak_unregister_no_lock(&oldTable->weak_table, oldObj, location);
     }
 
+    // 将location弱指针和新值进行绑定
     // Assign new value, if any.
     if (haveNew) {
         newObj = (objc_object *)
@@ -354,24 +375,30 @@ storeWeak(id *location, objc_object *newObj)
 }
 
 
-/** 
+/**
+ * 用弱指针保存一个新值，弱指针变量是可以在任何地方使用的赋值目标
+ *
  * This function stores a new value into a __weak variable. It would
  * be used anywhere a __weak variable is the target of an assignment.
- * 
- * @param location The address of the weak pointer itself
- * @param newObj The new object this weak ptr should now point to
- * 
+ *
+ * @param location The address of the weak pointer itself                   弱指针自身
+ * @param newObj The new object this weak ptr should now point to     弱指针指向的对象
+ *
  * @return \e newObj
  */
 id
 objc_storeWeak(id *location, id newObj)
 {
+    printf("%s \n",__func__);
     return storeWeak<DoHaveOld, DoHaveNew, DoCrashIfDeallocating>
         (location, (objc_object *)newObj);
 }
 
 
-/** 
+/**
+ * 将一个新值绑定给一个弱指针
+ * 如果新值正在释放或者其类不支持弱引用，则将弱指针指向nil
+ *
  * This function stores a new value into a __weak variable. 
  * If the new object is deallocating or the new object's class 
  * does not support weak references, stores nil instead.
@@ -408,6 +435,7 @@ objc_storeWeakOrNil(id *location, id newObj)
 id
 objc_initWeak(id *location, id newObj)
 {
+    printf("%s \n",__func__);
     if (!newObj) {
         *location = nil;
         return nil;
@@ -430,7 +458,10 @@ objc_initWeakOrNil(id *location, id newObj)
 }
 
 
-/** 
+/**
+ * 在弱表中删除弱指针指向
+ * 如果弱指针未指向任何对象，则无需更新弱表
+ *
  * Destroys the relationship between a weak pointer
  * and the object it is referencing in the internal weak
  * table. If the weak pointer is not referencing anything, 
@@ -444,12 +475,20 @@ objc_initWeakOrNil(id *location, id newObj)
 void
 objc_destroyWeak(id *location)
 {
+    printf("%s \n",__func__);
     (void)storeWeak<DoHaveOld, DontHaveNew, DontCrashIfDeallocating>
         (location, nil);
 }
 
 
 /*
+ 根据weak指针获取其指向的对象
+ 
+ 很久以前，如果我们看到对象正在释放，我们会急切地清除*location（弱引用指针）。
+ 这混淆了像NSPointerFunctions这样的代码，它试图预先运行原始存储，并假设如果存储是零，那么弱系统就完成了干扰。这是错误的：弱系统仍将在以后检查并清除存储。
+ 这可能会导致objc_weak_error投诉并崩溃。
+  因此，在释放之前不修改存储。
+ 
   Once upon a time we eagerly cleared *location if we saw the object 
   was deallocating. This confuses code like NSPointerFunctions which 
   tries to pre-flight the raw storage and assumes if the storage is 
@@ -517,7 +556,10 @@ objc_loadWeakRetained(id *location)
     return result;
 }
 
-/** 
+/**
+ * 根据weak指针获取其指向的对象，这个方法将被在任何使用weak表达式的地方使用
+ * objc_loadWeakRetained()对对象进行了retain操作，此处进行auto_release操作保证他在调用者使用时存活得足够长
+ *
  * This loads the object referenced by a weak pointer and returns it, after
  * retaining and autoreleasing the object to ensure that it stays alive
  * long enough for the caller to use it. This function would be used
@@ -530,34 +572,41 @@ objc_loadWeakRetained(id *location)
 id
 objc_loadWeak(id *location)
 {
+    printf("%s \n",__func__);
     if (!*location) return nil;
     return objc_autorelease(objc_loadWeakRetained(location));
 }
 
 
-/** 
+/**
+ * 将一个弱指针src指向的对象，赋予弱指针dst
+ *
  * This function copies a weak pointer from one location to another,
  * when the destination doesn't already contain a weak pointer. It
  * would be used for code like:
  *
  *  __weak id src = ...;
  *  __weak id dst = src;
- * 
+ *
  * This function IS NOT thread-safe with respect to concurrent 
  * modifications to the destination variable. (Concurrent weak clear is safe.)
  *
- * @param dst The destination variable.
- * @param src The source variable.
+ * @param dst The destination variable. 目标弱指针
+ * @param src The source variable.          原弱指针
  */
 void
 objc_copyWeak(id *dst, id *src)
 {
-    id obj = objc_loadWeakRetained(src);
+    printf("%s \n",__func__);
+    id obj = objc_loadWeakRetained(src); // 通过weak指针获取其指向的对象，调用了retainWeakReference，所以后面调用了一次release
     objc_initWeak(dst, obj);
     objc_release(obj);
 }
 
-/** 
+/**
+ * 将一个弱指针指向另外一个弱指针指向的对象
+ * 移动之前目标弱指针dst必须未经初始化，移动之后源弱指针src销毁（指向nil）
+ *
  * Move a weak pointer from one location to another.
  * Before the move, the destination must be uninitialized.
  * After the move, the source is nil.
@@ -565,10 +614,13 @@ objc_copyWeak(id *dst, id *src)
  * This function IS NOT thread-safe with respect to concurrent 
  * modifications to either weak variable. (Concurrent weak clear is safe.)
  *
+ * @param dst 目标弱指针
+ * @param src 源弱指针
  */
 void
 objc_moveWeak(id *dst, id *src)
 {
+    printf("%s \n",__func__);
     objc_copyWeak(dst, src);
     objc_destroyWeak(src);
     *src = nil;
@@ -576,6 +628,14 @@ objc_moveWeak(id *dst, id *src)
 
 
 /***********************************************************************
+ 自动释放池实施
+
+ 线程的自动释放池是指针的堆栈。
+ 每个指针要么是要释放的对象，要么是自动释放池的边界POOL_BOUNDARY。
+ 池令牌是指向该池的POOL_BOUNDARY的指针。执行pop操作后，将释放哨兵之后的所有对象。
+ 堆栈分为两个双向链接的页面列表。页面根据需要添加和删除。
+ 线程本地存储指向热页面，该页面存储新自动释放的对象。
+ 
    Autorelease pool implementation
 
    A thread's autorelease pool is a stack of pointers. 
@@ -1208,7 +1268,7 @@ objc_object::rootRelease_underflow(bool performDealloc)
     return rootRelease(performDealloc, true);
 }
 
-
+// 针对被弱引用或retain count在side table中溢出的非isa指针对象
 // Slow path of clearDeallocating() 
 // for objects with nonpointer isa
 // that were ever weakly referenced 
@@ -1297,6 +1357,7 @@ objc_object::sidetable_unlock()
 }
 
 
+// 将实例的引用计数、释放状态以及弱引用转移至side table，
 // Move the entire retain count to the side table, 
 // as well as isDeallocating and weaklyReferenced.
 void 
@@ -1316,13 +1377,13 @@ objc_object::sidetable_moveExtraRC_nolock(size_t extra_rc,
     uintptr_t carry;
     size_t refcnt = addc(oldRefcnt, extra_rc << SIDE_TABLE_RC_SHIFT, 0, &carry);
     if (carry) refcnt = SIDE_TABLE_RC_PINNED;
-    if (isDeallocating) refcnt |= SIDE_TABLE_DEALLOCATING;
-    if (weaklyReferenced) refcnt |= SIDE_TABLE_WEAKLY_REFERENCED;
+    if (isDeallocating) refcnt |= SIDE_TABLE_DEALLOCATING;  // 倒数第二位保存是否isDeallocating状态
+    if (weaklyReferenced) refcnt |= SIDE_TABLE_WEAKLY_REFERENCED;   // 最低位保存弱引用状态
 
     refcntStorage = refcnt;
 }
 
-
+// 将retain count从isa指针中转移到side table中
 // Move some retain counts to the side table from the isa field.
 // Returns true if the object is now pinned.
 bool 
@@ -1337,6 +1398,7 @@ objc_object::sidetable_addExtraRC_nolock(size_t delta_rc)
     ASSERT((oldRefcnt & SIDE_TABLE_DEALLOCATING) == 0);
     ASSERT((oldRefcnt & SIDE_TABLE_WEAKLY_REFERENCED) == 0);
 
+    // SIDE_TABLE_RC_PINNED 是否在side table中的标记位
     if (oldRefcnt & SIDE_TABLE_RC_PINNED) return true;
 
     uintptr_t carry;
@@ -1353,7 +1415,9 @@ objc_object::sidetable_addExtraRC_nolock(size_t delta_rc)
     }
 }
 
-
+// 引用计数从side table移至isa中，一次转移128
+// 返回实际减去的数值，可能比实际delta_rc的值小
+//
 // Move some retain counts from the side table to the isa field.
 // Returns the actual count subtracted, which may be less than the request.
 size_t 
@@ -1549,6 +1613,7 @@ objc_object::sidetable_release(bool performDealloc)
 }
 
 
+// 清空弱引用
 void 
 objc_object::sidetable_clearDeallocating()
 {
@@ -1561,6 +1626,7 @@ objc_object::sidetable_clearDeallocating()
     RefcountMap::iterator it = table.refcnts.find(this);
     if (it != table.refcnts.end()) {
         if (it->second & SIDE_TABLE_WEAKLY_REFERENCED) {
+            // 清空弱引用
             weak_clear_no_lock(&table.weak_table, (id)this);
         }
         table.refcnts.erase(it);

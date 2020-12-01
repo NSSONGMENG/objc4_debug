@@ -133,6 +133,7 @@ _objc_associations_init()
     AssociationsManager::init();
 }
 
+// 获取关联对象
 id
 _object_get_associative_reference(id object, const void *key)
 {
@@ -155,6 +156,8 @@ _object_get_associative_reference(id object, const void *key)
     return association.autoreleaseReturnedValue();
 }
 
+
+// 设置关联对象
 void
 _object_set_associative_reference(id object, const void *key, id value, uintptr_t policy)
 {
@@ -210,6 +213,8 @@ _object_set_associative_reference(id object, const void *key, id value, uintptr_
     association.releaseHeldValue();
 }
 
+// 释放关联对象
+// 与set/get一个关联的引用不同，因为原始的isa对象（如OS对象）无法跟踪是否存在关联对象，因此此方法对性能敏感。
 // Unlike setting/getting an associated reference,
 // this function is performance sensitive because of
 // raw isa objects (such as OS Objects) that can't track
@@ -222,13 +227,14 @@ _object_remove_assocations(id object)
     {
         AssociationsManager manager;
         AssociationsHashMap &associations(manager.get());
-        AssociationsHashMap::iterator i = associations.find((objc_object *)object);
+        AssociationsHashMap::iterator i = associations.find((objc_object *)object); // 获取对象绑定的hash表
         if (i != associations.end()) {
             refs.swap(i->second);
             associations.erase(i);
         }
     }
 
+    // release关联表中的所有关联对象
     // release everything (outside of the lock).
     for (auto &i: refs) {
         i.second.releaseHeldValue();

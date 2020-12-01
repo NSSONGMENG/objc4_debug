@@ -197,6 +197,7 @@ ClearExclusive(uintptr_t *dst __unused)
 
 #else
 
+// 加载isa的值
 static ALWAYS_INLINE
 uintptr_t
 LoadExclusive(uintptr_t *src)
@@ -204,6 +205,7 @@ LoadExclusive(uintptr_t *src)
     return __c11_atomic_load((_Atomic(uintptr_t) *)src, __ATOMIC_RELAXED);
 }
 
+// 更新isa的值
 static ALWAYS_INLINE
 bool
 StoreExclusive(uintptr_t *dst, uintptr_t oldvalue, uintptr_t value)
@@ -211,7 +213,7 @@ StoreExclusive(uintptr_t *dst, uintptr_t oldvalue, uintptr_t value)
     return __c11_atomic_compare_exchange_weak((_Atomic(uintptr_t) *)dst, &oldvalue, value, __ATOMIC_RELAXED, __ATOMIC_RELAXED);
 }
 
-
+// 保存新的isa
 static ALWAYS_INLINE
 bool
 StoreReleaseExclusive(uintptr_t *dst, uintptr_t oldvalue, uintptr_t value)
@@ -219,6 +221,7 @@ StoreReleaseExclusive(uintptr_t *dst, uintptr_t oldvalue, uintptr_t value)
     return __c11_atomic_compare_exchange_weak((_Atomic(uintptr_t) *)dst, &oldvalue, value, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
 }
 
+// 不是nonpointer_isa 对散列表中的引用计数进行处理
 static ALWAYS_INLINE
 void
 ClearExclusive(uintptr_t *dst __unused)

@@ -210,37 +210,45 @@ extern "C" int __cxa_atexit() { return 0; }
 
 /***********************************************************************
 * bad_magic.
+* 判断大小端序是否与硬件匹配
 * Return YES if the header has invalid Mach-o magic.
 **********************************************************************/
 bool bad_magic(const headerType *mhdr)
 {
     return (mhdr->magic != MH_MAGIC  &&  mhdr->magic != MH_MAGIC_64  &&  
             mhdr->magic != MH_CIGAM  &&  mhdr->magic != MH_CIGAM_64);
+
 }
 
-
+///
+/// 添加header信息
+///
+/// @param mhdr 为mach_header_64结构体对象
+/// @param path mach-o所在地址
+/// @param totalClasses 计算class的总量
+/// @param unoptimizedTotalClasses 没有被优化的类数组
+///
 static header_info * addHeader(const headerType *mhdr, const char *path, int &totalClasses, int &unoptimizedTotalClasses)
 {
     header_info *hi;
 
+    // 如果mach header包含未定义的大小端序，则返回YES
     if (bad_magic(mhdr)) return NULL;
 
+    // header info是否为通过缓存得到的
     bool inSharedCache = false;
 
+    // 在dyld缓存中查找header信息
     // Look for hinfo from the dyld shared cache.
     hi = preoptimizedHinfoForHeader(mhdr);
     if (hi) {
-        // Found an hinfo in the dyld shared cache.
-
         // Weed out duplicates.
-        if (hi->isLoaded()) {
-            return NULL;
-        }
-
+        if (hi->isLoaded()) return NULL;
+        
         inSharedCache = true;
 
-        // Initialize fields not set by the shared cache
-        // hi->next is set by appendHeader
+        // 初始化缓存未设置的字段，标记已加载，
+        // 后续在appendHeader()函数中设置hi->next操作，追加至链表尾部
         hi->setLoaded(true);
 
         if (PrintPreopt) {
@@ -251,39 +259,35 @@ static header_info * addHeader(const headerType *mhdr, const char *path, int &to
         _objc_fatal("shouldn't be here");
 #endif
 #if DEBUG
-        // Verify image_info
+        // debug环境下校验image info是否匹配
         size_t info_size = 0;
         const objc_image_info *image_info = _getObjcImageInfo(mhdr,&info_size);
         ASSERT(image_info == hi->info());
 #endif
-    }
-    else 
-    {
-        // Didn't find an hinfo in the dyld shared cache.
-
-        // Locate the __OBJC segment
+    } else {
+        // 定位Segment信息
         size_t info_size = 0;
         unsigned long seg_size;
         const objc_image_info *image_info = _getObjcImageInfo(mhdr,&info_size);
         const uint8_t *objc_segment = getsegmentdata(mhdr,SEG_OBJC,&seg_size);
         if (!objc_segment  &&  !image_info) return NULL;
 
-        // Allocate a header_info entry.
-        // Note we also allocate space for a single header_info_rw in the
-        // rw_data[] inside header_info.
+        // 创建新的header_info条目
+        // header_info_rw为从header_info中分离出可读写的数据，保存在ra_data数组中替代header_info
         hi = (header_info *)calloc(sizeof(header_info) + sizeof(header_info_rw), 1);
 
-        // Set up the new header_info entry.
+        // 构建新的头部信息条目
         hi->setmhdr(mhdr);
 #if !__OBJC2__
         // mhdr must already be set
         hi->mod_count = 0;
         hi->mod_ptr = _getObjcModules(hi, &hi->mod_count);
 #endif
-        // Install a placeholder image_info if absent to simplify code elsewhere
+        // 设置一个占位镜像信息以简化其他地方的工作
         static const objc_image_info emptyInfo = {0, 0};
         hi->setinfo(image_info ?: &emptyInfo);
 
+        // 设置已加载标记
         hi->setLoaded(true);
         hi->setAllClassesRealized(NO);
     }
@@ -298,6 +302,7 @@ static header_info * addHeader(const headerType *mhdr, const char *path, int &to
     }
 #endif
 
+    // 准备好header_info后追加至链表中（单向链表）
     appendHeader(hi);
     
     return hi;
@@ -451,8 +456,16 @@ void objc_addLoadImageFunc(objc_func_loadImage _Nonnull func) {
 #include "objc-file-old.h"
 #endif
 
-void 
-map_images_nolock(unsigned mhCount, const char * const mhPaths[],
+///
+/// 处理镜像映射
+///
+/// @param mhCount        Mach-o Header的数量，即mhdrs[]中mach_header结构体对象的个数
+/// @param mhPaths[]   Mach-o Header的路径数组，元素数与mhCount一致
+/// @param mhdrs[]        Mach-o Header数组，元素数与mhCount一致，元素为mach_header结构体
+///
+/// 目前mach_header为mach_header_64
+///
+void map_images_nolock(unsigned mhCount, const char * const mhPaths[],
                   const struct mach_header * const mhdrs[])
 {
     static bool firstTime = YES;
@@ -460,6 +473,7 @@ map_images_nolock(unsigned mhCount, const char * const mhPaths[],
     uint32_t hCount;
     size_t selrefCount = 0;
 
+    // 此函数在普通库初始化之前调用
     // Perform first-time initialization if necessary.
     // This function is called before ordinary library initializers. 
     // fixme defer initialization until an objc-using image is found?
@@ -472,15 +486,22 @@ map_images_nolock(unsigned mhCount, const char * const mhPaths[],
     }
 
 
-    // Find all images with Objective-C metadata.
+    // 找出所有OC元数据镜像
     hCount = 0;
 
+    // 计算类的数量，大小根据表的总数而定
     // Count classes. Size various table based on the total.
     int totalClasses = 0;
     int unoptimizedTotalClasses = 0;
     {
+        // 逆序处理过程，优先处理系统的动态库，如libdispatch.dylib、libxpc.dylib、CoreFoundation、
+        // ImageIO、CoreMedia、UIFoundation，最后处理项目工程
+        // 猜想：各mach-o（每个库都是一个mach-o，拥有mach hader）按照有底到浅的顺序添加到mhdrs数组中，同时把对应的路径添加到mhPaths数组
         uint32_t i = mhCount;
         while (i--) {
+            printf("---- header path %d : %s \n", mhCount - i, mhPaths[i]);
+            
+            // mach_header_64结构体
             const headerType *mhdr = (const headerType *)mhdrs[i];
 
             auto hi = addHeader(mhdr, mhPaths[i], totalClasses, unoptimizedTotalClasses);
@@ -594,6 +615,7 @@ map_images_nolock(unsigned mhCount, const char * const mhPaths[],
 
     firstTime = NO;
     
+    // 所有镜像数据准备好之后调用加载器加载镜像
     // Call image load funcs after everything is set up.
     for (auto func : loadImageFuncs) {
         for (uint32_t i = 0; i < mhCount; i++) {

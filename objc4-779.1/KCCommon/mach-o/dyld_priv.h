@@ -501,6 +501,7 @@ extern void dyld_stub_binder(void) __asm__("dyld_stub_binder");
 // never call from source code.  Used by closure builder to bind missing lazy symbols to
 extern void _dyld_missing_symbol_abort(void);
 
+// 唯一被objc调用，来确定dyld是否唯一拥有该选择器
 // Called only by objc to see if dyld has uniqued this selector.
 // Returns the value if dyld has uniqued it, or nullptr if it has not.
 // Note, this function must be called after _dyld_objc_notify_register.

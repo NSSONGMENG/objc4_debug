@@ -97,6 +97,8 @@ objc_object::isaBits() const
     return isa.bits;
 }
 
+// 是否为tagged pointer
+// 地址最后一个字节为1则是tagged pointer对象
 inline bool 
 objc_object::isTaggedPointer() 
 {
@@ -417,11 +419,15 @@ objc_object::rootIsDeallocating()
 inline void 
 objc_object::clearDeallocating()
 {
+    // slowpath表示!isa.nonpointer表达式成立的情况可能性较低
+    // nonpointer，标志isa指针是否为non-pointer 参考：http://www.sealiesoftware.com/blog/archive/2013/09/24/objc_explain_Non-pointer_isa.html
     if (slowpath(!isa.nonpointer)) {
+        // 清除弱指针引用
         // Slow path for raw pointer isa.
         sidetable_clearDeallocating();
     }
     else if (slowpath(isa.weakly_referenced  ||  isa.has_sidetable_rc)) {
+        // 清除弱指针引用
         // Slow path for non-pointer isa with weak refs and/or side table data.
         clearDeallocating_slow();
     }
@@ -485,6 +491,9 @@ objc_object::rootTryRetain()
     return rootRetain(true, false) ? true : false;
 }
 
+// retain操作，retain count有溢出
+// @param handleOverflow retain count是否有溢出
+// isa中引用计数占用8位，引用计数超过255会触发引用计数溢出，引用计数将被转移到side table中记录，且isa中的引用计数折半
 ALWAYS_INLINE id 
 objc_object::rootRetain(bool tryRetain, bool handleOverflow)
 {
@@ -513,10 +522,13 @@ objc_object::rootRetain(bool tryRetain, bool handleOverflow)
             if (!tryRetain && sideTableLocked) sidetable_unlock();
             return nil;
         }
+        
+        // retain count溢出则carry为1，否则为0
         uintptr_t carry;
         newisa.bits = addc(newisa.bits, RC_ONE, 0, &carry);  // extra_rc++
 
         if (slowpath(carry)) {
+            // 有溢出
             // newisa.extra_rc++ overflowed
             if (!handleOverflow) {
                 ClearExclusive(&isa.bits);
@@ -527,12 +539,13 @@ objc_object::rootRetain(bool tryRetain, bool handleOverflow)
             if (!tryRetain && !sideTableLocked) sidetable_lock();
             sideTableLocked = true;
             transcribeToSideTable = true;
-            newisa.extra_rc = RC_HALF;
-            newisa.has_sidetable_rc = true;
+            newisa.extra_rc = RC_HALF;  // 引用计数折半
+            newisa.has_sidetable_rc = true; // 标记有side table引用计数
         }
     } while (slowpath(!StoreExclusive(&isa.bits, oldisa.bits, newisa.bits)));
 
     if (slowpath(transcribeToSideTable)) {
+        // 赋值引用计数的一半到side table
         // Copy the other half of the retain counts to the side table.
         sidetable_addExtraRC_nolock(RC_HALF);
     }
@@ -557,6 +570,11 @@ objc_object::release()
 }
 
 
+// release实现，忽略子类复写。不允许调用-dealloc
+// 返回true表示对象应立即释放
+// 不检查isa.fast_rr标记（是否包含retain/release/aoturelease等方法）；如果包含复写的rr则它已经被调用，并调用了[super release]
+//
+//
 // Base release implementation, ignoring overrides.
 // Does not call -dealloc.
 // Returns true if the object should now be deallocated.
@@ -591,9 +609,10 @@ objc_object::rootRelease(bool performDealloc, bool handleUnderflow)
 
  retry:
     do {
-        oldisa = LoadExclusive(&isa.bits);
+        oldisa = LoadExclusive(&isa.bits);  // 获取isa中的retain count
         newisa = oldisa;
         if (slowpath(!newisa.nonpointer)) {
+            // 普通指针
             ClearExclusive(&isa.bits);
             if (rawISA()->isMetaClass()) return false;
             if (sideTableLocked) sidetable_unlock();
@@ -603,6 +622,7 @@ objc_object::rootRelease(bool performDealloc, bool handleUnderflow)
         uintptr_t carry;
         newisa.bits = subc(newisa.bits, RC_ONE, 0, &carry);  // extra_rc--
         if (slowpath(carry)) {
+            // 溢出，isa中保存的retain count为0，触发将side table中的引用计数迁移至isa中
             // don't ClearExclusive()
             goto underflow;
         }
@@ -618,14 +638,15 @@ objc_object::rootRelease(bool performDealloc, bool handleUnderflow)
     // abandon newisa to undo the decrement
     newisa = oldisa;
 
+    // has_sidetable_rc在side table中保存有引用计数
     if (slowpath(newisa.has_sidetable_rc)) {
         if (!handleUnderflow) {
             ClearExclusive(&isa.bits);
             return rootRelease_underflow(performDealloc);
         }
 
+        // 将side table中的retain count迁移一部分到isa内部
         // Transfer retain count from side table to inline storage.
-
         if (!sideTableLocked) {
             ClearExclusive(&isa.bits);
             sidetable_lock();
@@ -635,6 +656,8 @@ objc_object::rootRelease(bool performDealloc, bool handleUnderflow)
             goto retry;
         }
 
+        // 将side table中的引用计数数量转移至isa指针中，一次性转移128
+        // borrowed 实际转移的数量
         // Try to remove some retain counts from the side table.        
         size_t borrowed = sidetable_subExtraRC_nolock(RC_HALF);
 
@@ -642,9 +665,11 @@ objc_object::rootRelease(bool performDealloc, bool handleUnderflow)
         // even if the side table count is now zero.
 
         if (borrowed > 0) {
+            // isa.extra_rc即对象的引用计数，要比实际值小1
             // Side table retain count decreased.
             // Try to add them to the inline count.
             newisa.extra_rc = borrowed - 1;  // redo the original decrement too
+            // 保存新的isa
             bool stored = StoreReleaseExclusive(&isa.bits, 
                                                 oldisa.bits, newisa.bits);
             if (!stored) {
@@ -710,6 +735,7 @@ objc_object::rootRelease(bool performDealloc, bool handleUnderflow)
 inline id 
 objc_object::autorelease()
 {
+    // 必须为普通指针
     ASSERT(!isTaggedPointer());
     if (fastpath(!ISA()->hasCustomRR())) {
         return rootAutorelease();
@@ -736,7 +762,8 @@ objc_object::rootRetainCount()
     if (isTaggedPointer()) return (uintptr_t)this;
 
     sidetable_lock();
-    isa_t bits = LoadExclusive(&isa.bits);
+    isa_t bits = LoadExclusive(&isa.bits);  // 加载isa的值
+    // 不是nonpointer_isa 对散列表中的引用计数进行处理
     ClearExclusive(&isa.bits);
     if (bits.nonpointer) {
         uintptr_t rc = 1 + bits.extra_rc;
@@ -836,7 +863,7 @@ objc_object::changeIsa(Class cls)
     return oldisa.cls;
 }
 
-
+// 拥有关联对象
 inline bool
 objc_object::hasAssociatedObjects()
 {
@@ -850,7 +877,7 @@ objc_object::setHasAssociatedObjects()
     getIsa()->setInstancesHaveAssociatedObjects();
 }
 
-
+// 被弱引用
 inline bool
 objc_object::isWeaklyReferenced()
 {
@@ -1189,7 +1216,9 @@ setReturnDisposition(ReturnDisposition disposition)
     tls_set_direct(RETURN_DISPOSITION_KEY, (void*)(uintptr_t)disposition);
 }
 
-
+// 尝试以给定的配置（+0或+1）为优化回报做准备。
+// 如果优化路径成功，则返回true。
+// 否则，返回值必须照常保留和/或自动释放。
 // Try to prepare for optimized return with the given disposition (+0 or +1).
 // Returns true if the optimized path is successful.
 // Otherwise the return value must be retained and/or autoreleased as usual.

@@ -344,6 +344,7 @@ struct __attribute__((packed)) objc_stringhash_t {
 #endif
 };
 
+// 预先计算的选择表 ？？？
 // Precomputed selector table.
 // Edit objc-sel-table.s if you change this structure.
 struct objc_selopt_t : objc_stringhash_t {
@@ -372,9 +373,9 @@ struct objc_selopt_t : objc_stringhash_t {
     }
 };
 
+// 与计算类列表
 // Precomputed class list.
 // Edit objc-sel-table.s if you change these structures.
-
 struct objc_classheader_t {
     objc_stringhash_offset_t clsOffset;
     objc_stringhash_offset_t hiOffset;
@@ -748,6 +749,7 @@ enum : uint32_t {
     NoMissingWeakSuperclasses = (1 << 1)   // set in development cache and customer
 };
 
+// 优先级最高的优化结构体
 // Top-level optimization structure.
 // Edit objc-sel-table.s if you change this structure.
 struct alignas(alignof(void*)) objc_opt_t {

@@ -479,7 +479,7 @@
 				TargetAttributes = {
 					7AF767A6220C504A00D3CB66 = {
 						CreatedOnToolsVersion = 10.1;
-						DevelopmentTeam = U5LAHK8PW6;
+						DevelopmentTeam = 8RT8SAJSN9;
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -636,7 +636,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = U5LAHK8PW6;
+				DEVELOPMENT_TEAM = 8RT8SAJSN9;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;

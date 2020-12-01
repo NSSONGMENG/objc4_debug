@@ -55,6 +55,9 @@ static int loadable_categories_allocated = 0;
 
 
 /***********************************************************************
+ *
+ * 将 +load 方法添加到loadable_categorys数组中，不包含+load的类将被过滤
+ *
 * add_class_to_loadable_list
 * Class cls has just become connected. Schedule it for +load if
 * it implements a +load method.
@@ -89,6 +92,9 @@ void add_class_to_loadable_list(Class cls)
 
 /***********************************************************************
 * add_category_to_loadable_list
+ *
+ * 将 +load 方法添加到loadable_categorys数组中，不包含+load的分类将被过滤
+ *
 * Category cat's parent class exists and the category has been attached
 * to its class. Schedule this category for +load after its parent class
 * becomes connected and has its own +load method called.
@@ -242,37 +248,47 @@ static bool call_category_loads(void)
         if (!cat) continue;
 
         cls = _category_getClass(cat);
+        // 实现了+load方法的类都被认为是loadable
         if (cls  &&  cls->isLoadable()) {
             if (PrintLoading) {
                 _objc_inform("LOAD: +[%s(%s) load]\n", 
                              cls->nameForLogging(), 
                              _category_getName(cat));
             }
+            
+            // 方法调用
             (*load_method)(cls, @selector(load));
             cats[i].cat = nil;
         }
     }
 
+    // 剔除执行过的+load方法占位，按顺序回收空位。剩余全是没有category对应的+load
     // Compact detached list (order-preserving)
     shift = 0;
     for (i = 0; i < used; i++) {
         if (cats[i].cat) {
-            cats[i-shift] = cats[i];
+            cats[i-shift] = cats[i];    // 算法挺有意思
         } else {
             shift++;
         }
     }
     used -= shift;
 
+    // 若还有其他可加载的分类，则进入for循环，将新的方法追加+laod
+    //【进入方法时loadable_categories_used设置为0，此时拿来做>0的判断，难道是多线程处理load_images ？（load_images会多次调用）】
     // Copy any new +load candidates from the new list to the detached list.
     new_categories_added = (loadable_categories_used > 0);
     for (i = 0; i < loadable_categories_used; i++) {
         if (used == allocated) {
+
+            // 数组扩容数量2倍+16  【为啥是2倍+16？】
             allocated = allocated*2 + 16;
             cats = (struct loadable_category *)
                 realloc(cats, allocated *
                                   sizeof(struct loadable_category));
         }
+        
+        // 追加可调用+load
         cats[used++] = loadable_categories[i];
     }
 
@@ -345,6 +361,7 @@ void call_load_methods(void)
     if (loading) return;
     loading = YES;
 
+    // 在自动释放池中调用+load
     void *pool = objc_autoreleasePoolPush();
 
     do {

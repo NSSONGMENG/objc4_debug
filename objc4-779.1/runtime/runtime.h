@@ -1614,12 +1614,14 @@ OBJC_EXPORT id _Nullable
 objc_loadWeak(id _Nullable * _Nonnull location)
     OBJC_AVAILABLE(10.7, 5.0, 9.0, 1.0, 2.0);
 
-/** 
+/**
+ * 此函数将新值存储到__weak变量中。 __weak变量是可以在任何地方使用的赋值目标。
+ *
  * This function stores a new value into a __weak variable. It would
  * be used anywhere a __weak variable is the target of an assignment.
  * 
- * @param location The address of the weak pointer itself
- * @param obj The new object this weak ptr should now point to
+ * @param location The address of the weak pointer itself           弱指针本身
+ * @param obj The new object this weak ptr should now point to      弱指针指向的对象
  * 
  * @return The value stored into \e location, i.e. \e obj
  */

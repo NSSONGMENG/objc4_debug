@@ -2927,8 +2927,12 @@ void _objc_flush_caches(Class cls)
 }
 
 
+///
+/// ABI (Application Binary Interface)
+/// 引用程序二进制接口，对CPU如何执行函数调用、二进制代码内容划分的一种约定，目的是为了保证二进制代码的兼容性
+///
 /***********************************************************************
-* map_images
+* map_images 处理将要被dyld映射的给定镜像
 * Process the given images which are being mapped in by dyld.
 * Calls ABI-agnostic code after taking ABI-specific locks.
 *
@@ -2947,25 +2951,31 @@ map_images(unsigned count, const char * const paths[],
 * load_images
 * Process +load in the given images which are being mapped in by dyld.
 *
+* 执行 dyld 提供的并且已被 map_images 处理后的 image 中的 +load
+*
 * Locking: write-locks runtimeLock and loadMethodLock
 **********************************************************************/
 extern bool hasLoadMethods(const headerType *mhdr);
 extern void prepare_load_methods(const headerType *mhdr);
 
-void
-load_images(const char *path __unused, const struct mach_header *mh)
+void load_images(const char *path __unused, const struct mach_header *mh)
 {
     // Return without taking locks if there are no +load methods here.
     if (!hasLoadMethods((const headerType *)mh)) return;
 
+    // 递归锁，防止多次加锁造成死锁
     recursive_mutex_locker_t lock(loadMethodLock);
 
     // Discover load methods
     {
+        // 互斥锁，避免对loadable_categories的多线程写操作
         mutex_locker_t lock2(runtimeLock);
+        
+        // 准备+load方法
         prepare_load_methods((const headerType *)mh);
     }
 
+    // 调用+laod方法
     // Call +load methods (without runtimeLock - re-entrant)
     call_load_methods();
 }
@@ -2974,6 +2984,8 @@ load_images(const char *path __unused, const struct mach_header *mh)
 /***********************************************************************
 * unmap_image
 * Process the given image which is about to be unmapped by dyld.
+*
+* 将被dyld执行取消映射操作
 *
 * Locking: write-locks runtimeLock and loadMethodLock
 **********************************************************************/
@@ -3247,7 +3259,7 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
     uint32_t hIndex;
     size_t count;
     size_t i;
-    Class *resolvedFutureClasses = nil;
+    Class *resolvedFutureClasses = nil; //识别class
     size_t resolvedFutureClassCount = 0;
     static bool doneOnce;
     bool launchTime = NO;
@@ -3268,6 +3280,7 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
         // Disable non-pointer isa under some conditions.
 
 # if SUPPORT_INDEXED_ISA
+        // 禁用非指针isa，如果任何镜像包含旧Swift代码
         // Disable nonpointer isa if any image contains old Swift code
         for (EACH_HEADER) {
             if (hi->info()->containsSwift()  &&
@@ -3285,6 +3298,7 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
 # endif
 
 # if TARGET_OS_OSX
+        // 如果app比较老，禁用非指针isa
         // Disable non-pointer isa if the app is too old
         // (linked before OS X 10.11)
         if (dyld_get_program_sdk_version() < DYLD_MACOSX_VERSION_10_11) {
@@ -3296,6 +3310,8 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
             }
         }
 
+        // 如果app包含 __DATA,__objc_rawisa块，则禁用非指针isa
+        // 新app加载就得扩展可能需要这些
         // Disable non-pointer isa if the app has a __DATA,__objc_rawisa section
         // New apps that load old extensions may need this.
         for (EACH_HEADER) {
@@ -3318,6 +3334,9 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
             disableTaggedPointers();
         }
         
+        // 初始化指针混淆器
+        // 标记指针混淆器的目的是使攻击者在存在缓冲区溢出或对某些内存的其他写控制时，更难将特定对象构造为标记指针。
+        // 当设置或检索有效负载值时，混淆器会使用带标记的指针。它们在第一次使用时就充满了随机性。
         initializeTaggedPointerObfuscator();
 
         if (PrintConnecting) {
@@ -3325,10 +3344,12 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
         }
 
         // namedClasses
-        // Preoptimized classes don't go in this table.
-        // 4/3 is NXMapTable's load factor
+        // Preoptimized classes don't go in this table. （预优化的类不在表中）？？？
+        // 4/3 is NXMapTable's load factor （负荷系数）
         int namedClassesSize = 
             (isPreoptimized() ? unoptimizedTotalClasses : totalClasses) * 4 / 3;
+        
+        // 初始化hash表，存放：类名-class
         gdb_objc_realized_classes =
             NXCreateMapTable(NXStrValueMapPrototype, namedClassesSize);
 
@@ -3337,6 +3358,8 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
 
     // Fix up @selector references
     static size_t UnfixedSelectors;
+
+    // 修复@selector引用，操作放在{}中可以减小lock的粒度
     {
         mutex_locker_t lock(selLock);
         for (EACH_HEADER) {
@@ -3348,6 +3371,7 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
             for (i = 0; i < count; i++) {
                 const char *name = sel_cname(sels[i]);
                 SEL sel = sel_registerNameNoLock(name, isBundle);
+                // printf("== selector : %s \n", name);
                 if (sels[i] != sel) {
                     sels[i] = sel;
                 }
@@ -3357,15 +3381,19 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
 
     ts.log("IMAGE TIMES: fix up selector references");
 
+    // OS dylib是否覆盖了共享缓存中的副本
     // Discover classes. Fix up unresolved future classes. Mark bundle classes.
     bool hasDyldRoots = dyld_shared_cache_some_image_overridden();
-
+    
+    // 加载类
     for (EACH_HEADER) {
         if (! mustReadClasses(hi, hasDyldRoots)) {
+            // 镜像已经被充分的优化，不需要调用readClass()
             // Image is sufficiently optimized that we need not call readClass()
             continue;
         }
 
+        // 获取类列表
         classref_t const *classlist = _getObjc2ClassList(hi, &count);
 
         bool headerIsBundle = hi->isBundle();
@@ -3373,6 +3401,7 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
 
         for (i = 0; i < count; i++) {
             Class cls = (Class)classlist[i];
+            // 读取类
             Class newCls = readClass(cls, headerIsBundle, headerIsPreoptimized);
 
             if (newCls != cls  &&  newCls) {
@@ -3389,6 +3418,10 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
 
     ts.log("IMAGE TIMES: discover classes");
 
+    // 修复remapped类
+    // 类列表和非惰性类列表仍未重新映射。
+    // 类ref和super ref被重新映射用于消息调度。
+    //
     // Fix up remapped classes
     // Class list and nonlazy class list remain unremapped.
     // Class refs and super refs are remapped for message dispatching.
@@ -3429,6 +3462,7 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
 
     bool cacheSupportsProtocolRoots = sharedCacheSupportsProtocolRoots();
 
+    // 读取协议，修复协议引用
     // Discover protocols. Fix up protocol refs.
     for (EACH_HEADER) {
         extern objc_class OBJC_CLASS_$_Protocol;
@@ -3466,7 +3500,8 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
     // Preoptimized images may have the right 
     // answer already but we don't know for sure.
     for (EACH_HEADER) {
-        // At launch time, we know preoptimized image refs are pointing at the
+        // 预优化的镜像引用指向协议的共享内存定义。加载时跳过检查，但必须在共享内存镜像加载后访问协议引用
+        // At launch time, we know preoptimized image refs are  pointing at the
         // shared cache definition of a protocol.  We can skip the check on
         // launch, but have to visit @protocol refs for shared cache images
         // loaded later.
@@ -3480,6 +3515,7 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
 
     ts.log("IMAGE TIMES: fix up @protocol references");
 
+    // 加载分类
     // Discover categories.
     for (EACH_HEADER) {
         bool hasClassProperties = hi->info()->hasCategoryClassProperties();
@@ -3491,6 +3527,7 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
                 locstamped_category_t lc{cat, hi};
                 
                 if (!cls) {
+                    // 分类的主类丢失处理
                     // Category's target class is missing (probably weak-linked).
                     // Ignore the category.
                     if (PrintConnecting) {
@@ -3501,6 +3538,7 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
                     continue;
                 }
                 
+                // 处理分类
                 // Process this category.
                 if (cls->isStubClass()) {
                     // Stub classes are never realized. Stub classes
@@ -3509,6 +3547,9 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
                     // class methods or properties to the stub itself.
                     // methodizeClass() will find them and add them to
                     // the metaclass as appropriate.
+                    
+                    // 根类未实现，根类在实现前没有元类，因此将自己视为根类添加分类的类方法或属性（应该没有属性吧？）
+                    // methodizeClass()将找到他们并将他们添加到元类
                     if (cat->instanceMethods ||
                         cat->protocols ||
                         cat->instanceProperties ||
@@ -3519,6 +3560,7 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
                         objc::unattachedCategories.addForClass(lc, cls);
                     }
                 } else {
+                    // 1. 注册分类和主类 2. 若类已加载则重新构建类的方法列表
                     // First, register the category with its target class.
                     // Then, rebuild the class's method lists (etc) if
                     // the class is realized.
@@ -3532,6 +3574,7 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
                         }
                     }
                     
+                    // 注册类方法
                     if (cat->classMethods  ||  cat->protocols
                         ||  (hasClassProperties && cat->_classProperties))
                     {
@@ -3556,6 +3599,7 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
 
     // +load handled by prepare_load_methods()
 
+    // 实现非懒加载类，调用+load方法和静态对象
     // Realize non-lazy classes (for +load methods and static instances)
     for (EACH_HEADER) {
         classref_t const *classlist = 
@@ -3582,6 +3626,7 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
 
     ts.log("IMAGE TIMES: realize non-lazy classes");
 
+    // 加载future类
     // Realize newly-resolved future classes, in case CF manipulates them
     if (resolvedFutureClasses) {
         for (i = 0; i < resolvedFutureClassCount; i++) {
@@ -3602,6 +3647,7 @@ void _read_images(header_info **hList, uint32_t hCount, int totalClasses, int un
     }
 
 
+    // 打印统计信息
     // Print preoptimization statistics
     if (PrintPreopt) {
         static unsigned int PreoptTotalMethodLists;
@@ -3677,13 +3723,17 @@ static void schedule_class_load(Class cls)
     if (!cls) return;
     ASSERT(cls->isRealized());  // _read_images should realize
 
+    // 若类已加载，则退出
     if (cls->data()->flags & RW_LOADED) return;
 
+    // 递归处理继承链的+load，从根类的+load开始添加
     // Ensure superclass-first ordering
     schedule_class_load(cls->superclass);
 
     add_class_to_loadable_list(cls);
-    cls->setInfo(RW_LOADED); 
+    
+    // 写入已加载标记
+    cls->setInfo(RW_LOADED);
 }
 
 // Quick scan for +load methods that doesn't take a lock.
@@ -3695,18 +3745,23 @@ bool hasLoadMethods(const headerType *mhdr)
     return false;
 }
 
+// 收集+load方法
+// 1. 读取class列表，遍历将class的+laod方法添加至loadable_categories数组
+// 2. 读取category列表，遍历将category添加至loadable列表
 void prepare_load_methods(const headerType *mhdr)
 {
     size_t count, i;
 
     runtimeLock.assertLocked();
 
+    // 处理类的+load
     classref_t const *classlist = 
         _getObjc2NonlazyClassList(mhdr, &count);
     for (i = 0; i < count; i++) {
         schedule_class_load(remapClass(classlist[i]));
     }
 
+    // 处理分类的+load
     category_t * const *categorylist = _getObjc2NonlazyCategoryList(mhdr, &count);
     for (i = 0; i < count; i++) {
         category_t *cat = categorylist[i];
@@ -3718,6 +3773,8 @@ void prepare_load_methods(const headerType *mhdr)
         }
         realizeClassWithoutSwift(cls, nil);
         ASSERT(cls->ISA()->isRealized());
+        
+        // 遍历列表，去除+load方法放在loadable_categories列表中
         add_category_to_loadable_list(cat);
     }
 }
@@ -7533,23 +7590,23 @@ object_copyFromZone(id oldObj, size_t extraBytes, void *zone)
 
 /***********************************************************************
 * objc_destructInstance
-* Destroys an instance without freeing memory. 
-* Calls C++ destructors.
-* Calls ARC ivar cleanup.
-* Removes associative references.
-* Returns `obj`. Does nothing if `obj` is nil.
+* Destroys an instance without freeing memory.   在不释放内存的情况下销毁实例
+* Calls C++ destructors.  调用C++析构函数
+* Calls ARC ivar cleanup. 调用ARC成员变量清理
+* Removes associative references. 移除关联对象
+* Returns `obj`. Does nothing if `obj` is nil.  返回对象本身
 **********************************************************************/
 void *objc_destructInstance(id obj) 
 {
     if (obj) {
         // Read all of the flags at once for performance.
-        bool cxx = obj->hasCxxDtor();
-        bool assoc = obj->hasAssociatedObjects();
+        bool cxx = obj->hasCxxDtor();   // 包含C++析构函数
+        bool assoc = obj->hasAssociatedObjects(); // 包含关联对象
 
         // This order is important.
-        if (cxx) object_cxxDestruct(obj);
-        if (assoc) _object_remove_assocations(obj);
-        obj->clearDeallocating();
+        if (cxx) object_cxxDestruct(obj);   // 调用C++析构函数
+        if (assoc) _object_remove_assocations(obj); // 移除关联对象
+        obj->clearDeallocating();   // 
     }
 
     return obj;
@@ -7911,7 +7968,9 @@ Class class_setSuperclass(Class cls, Class newSuper)
 
 void runtime_init(void)
 {
+    // 初始化未加载category集合
     objc::unattachedCategories.init(32);
+    // 初始化用objc_allocateClassPair分配的所有类(和元类)的表。
     objc::allocatedClasses.init();
 }
 
